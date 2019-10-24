@@ -1,0 +1,4 @@
+*.elf
+*.bin
+static/*.h
+static/*.html.gz

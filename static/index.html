@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AirQ</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" type="image/png" href="favicon.png">
+    <style>
+        body { font-family: 'Segoe UI', 'Helvetica Neue', Roboto, sans-serif; margin: 0rem; }
+        body > div { margin: 0rem 1rem; }
+        #data { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+        h1 { font-size: 3rem; font-weight: 1000; margin: 1rem; }
+        h1 img { height: 1em; }
+        h2 { font-size: 1.25rem; font-weight: 600; color: #005; margin-bottom: 0.25rem; }
+        span  { font-size: 2rem; margin: 0rem; }
+        .unit { font-size: 1rem; color: #777; }
+        .p5Canvas { position: absolute; bottom: 0rem; }
+    </style>
+</head>
+<body>
+    <h1><img src="favicon.png"/> AirQ</h1>
+    <div id="time">Time: hh:mm:ss</div>
+
+    <div id="data">
+        <div>
+            <h2>Temperature</h2>
+            <span id="temperature">unknown</span>
+            <span class="unit">&deg;C</span>
+        </div>
+
+        <div>
+            <h2>Humidity</h2>
+            <span id="humidity">unknown</span>
+            <span class="unit">%</span>
+        </div>
+
+        <div>
+            <h2>Pressure</h2>
+            <span id="pressure">unknown</span>
+            <span class="unit">hPa</span>
+        </div>
+
+        <div>
+            <h2>Gas</h2>
+            <span id="gas">unknown</span>
+            <span class="unit">k&#8486;</span>
+        </div>
+    </div>
+
+    <script>
+        function toTime(hh, mm, ss){
+            h2 = hh.toString().padStart(2, "0");
+            m2 = mm.toString().padStart(2, "0");
+            s2 = ss.toString().padStart(2, "0");
+            return h2 +":"+ m2 +":"+ s2
+        }
+        var ws = new WebSocket('ws://' + location.hostname + ':81/');
+        ws.onopen = function() {
+            ws.send('Connect WebSocket');
+        };
+        ws.onerror = function(error) {
+            console.log('WebSocket Error ', error);
+        };
+        ws.onmessage = function(e) {
+            data = JSON.parse(e.data);
+            let time = data['time'];
+            let ss = Math.floor( time         % 60);
+            let mm = Math.floor((time / 60)   % 60);
+            let hh = Math.floor((time / 3600) % 24);
+            document.getElementById("time").innerHTML        = "Time: " + toTime(hh, mm, ss)
+            document.getElementById("temperature").innerHTML = data['temperature'].toFixed(1);
+            document.getElementById("humidity").innerHTML    = data['humidity'].toFixed(1);
+            document.getElementById("pressure").innerHTML    = data['pressure'].toFixed(1);
+            document.getElementById("gas").innerHTML         = data['gas'].toFixed(1);
+        };
+        ws.onclose = function() {
+            console.log('Disconnected WebSocket');
+        };
+    </script>
+</body>
+</html>
