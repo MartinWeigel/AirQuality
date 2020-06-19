@@ -3,7 +3,7 @@
  *
  * Creates a webserver to display the current data of the BME680.
  *
- * Copyright (C) 2019 Martin Weigel <mail@MartinWeigel.com>
+ * Copyright (C) 2020 Martin Weigel <mail@MartinWeigel.com>
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -37,6 +37,21 @@
 #define I2C_SDA      (4)
 #define I2C_CLK      (0)
 
+// If enabled, UDP packages will be sent to server
+#define UDP_ENABLE   (1)
+#if UDP_ENABLE
+    #include <ArduinoJson.h>
+    #define UDP_SERVERIP            ("192.168.178.28")  // IP to local server running UDPRecorder
+    #define UDP_PORT                (5777)              // UDP port to use (matching UDPRecorder)
+    #define UDP_PACKAGE_INTERVAL    (60000)             // Waiting time in ms (60000 = 1 minute)
+    #define UDP_NAME                ("AirQ")            // Name that is part of the UDP package
+    #define UDP_MSGSIZE             (100)
+    WiFiUDP udp;
+    IPAddress udpIP;
+    uint32_t lastUDPMillis;
+#endif
+
+// Linear regression results of calibration
 #define TEMP_REGRESSION_M (-4.9776)
 #define TEMP_REGRESSION_X ( 0.9167)
 
@@ -114,6 +129,23 @@ void dataUpdateOverWebsocket()
     websocket.broadcastTXT(buffer, strlen(buffer));
 }
 
+void sendUDPPackage(SensorData* data)
+{
+    char buffer[UDP_MSGSIZE];
+    StaticJsonDocument<UDP_MSGSIZE> msgPack;
+    msgPack["name"]         = UDP_NAME;
+    msgPack["time"]         = data->unixTime;
+    msgPack["temperature"]  = data->temperature;
+    msgPack["pressure"]     = data->pressure;
+    msgPack["humidity"]     = data->humidity;
+    msgPack["gas"]          = data->gasResistance;
+    size_t msgSize = serializeMsgPack(msgPack, buffer);
+
+    udp.beginPacket(udpIP, UDP_PORT);
+    udp.write(buffer, msgSize);
+    udp.endPacket();
+}
+
 void setup()
 {
     Serial.begin(115200);
@@ -137,7 +169,7 @@ void setup()
     // SETUP I2C
     Wire.begin(I2C_SDA, I2C_CLK);
     if(!bme.begin()) {
-        Serial.println("Could not find a valid BME680 sensor, check wiring!");
+        Serial.println("ERROR: Could not find a valid BME680 sensor, check wiring!");
         while (1);
     }
     // Set up oversampling and filter initialization
@@ -167,7 +199,17 @@ void setup()
     websocket.begin();
     websocket.onEvent(webSocketEvent);
 
+    // Start network time service
     ntp.begin("0.europe.pool.ntp.org", 300);
+
+    // Start UDP service if enabled
+    #if UDP_ENABLE
+        udp = WiFiUDP();
+        if(!udpIP.fromString(UDP_SERVERIP)) {
+            Serial.println("ERROR: UDP_SERVERIP is not a valid ip!");
+            while (1);
+        }
+    #endif
 }
 
 void loop()
@@ -188,8 +230,16 @@ void loop()
         sensordata.pressure = bme.pressure / 100.0;
         sensordata.gasResistance = bme.gas_resistance / 1000.0;
 
-        // Publish data
+        // Publish data over Websocket
         dataUpdateOverWebsocket();
+
+        #if UDP_ENABLE
+            // Publish data over UDP in given interval
+            if(currentMillis >= lastUDPMillis + UDP_PACKAGE_INTERVAL) {
+                sendUDPPackage(&sensordata);
+                lastUDPMillis = currentMillis;
+            }
+        #endif
 
         // Start new sensing cycle
         sensorReadingDone = bme.beginReading();
