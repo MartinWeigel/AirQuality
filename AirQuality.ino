@@ -25,6 +25,7 @@
 #include <WebSocketsServer.h>
 #include "Adafruit_BME680.h"
 #include "ESP8266NTP.h"
+#include "ESP8266mDNS.h"
 
 #include "static/index.html.h"
 #include "static/favicon.png.h"
@@ -32,6 +33,7 @@
 
 #include "wifi_credentials.h"
 
+#define NAME   ("AirQ")
 #define SERVER_PORT  (80)
 #define SOCKET_PORT  (81)
 #define I2C_SDA      (4)
@@ -44,7 +46,6 @@
     #define UDP_SERVERIP            ("192.168.178.28")  // IP to local server running UDPRecorder
     #define UDP_PORT                (5777)              // UDP port to use (matching UDPRecorder)
     #define UDP_PACKAGE_INTERVAL    (60000)             // Waiting time in ms (60000 = 1 minute)
-    #define UDP_NAME                ("AirQ")            // Name that is part of the UDP package
     #define UDP_MSGSIZE             (100)
     WiFiUDP udp;
     IPAddress udpIP;
@@ -133,7 +134,7 @@ void sendUDPPackage(SensorData* data)
 {
     char buffer[UDP_MSGSIZE];
     StaticJsonDocument<UDP_MSGSIZE> msgPack;
-    msgPack["name"]         = UDP_NAME;
+    msgPack["name"]         = NAME;
     msgPack["time"]         = data->unixTime;
     msgPack["temperature"]  = data->temperature;
     msgPack["pressure"]     = data->pressure;
@@ -202,6 +203,12 @@ void setup()
     // Start network time service
     ntp.begin("0.europe.pool.ntp.org", 300);
 
+    // Start MDNS
+    if(MDNS.begin(NAME)) {
+        Serial.print("MDNS registered ("); Serial.print(NAME); Serial.println(".local)");
+        MDNS.addService("http", "tcp", 80);
+    }
+
     // Start UDP service if enabled
     #if UDP_ENABLE
         udp = WiFiUDP();
@@ -215,6 +222,8 @@ void setup()
 void loop()
 {
     uint32_t currentMillis = millis();
+
+    MDNS.update();
 
     // Update the time
     ntp.update();
