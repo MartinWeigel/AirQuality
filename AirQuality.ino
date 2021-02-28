@@ -1,9 +1,9 @@
 /**
  * AirQuality.ino
  *
- * Creates a webserver to display the current data of the BME680.
+ * Send the data of a BME680 over MQTT.
  *
- * Copyright (C) 2020 Martin Weigel <mail@MartinWeigel.com>
+ * Copyright (C) 2021 Martin Weigel <mail@MartinWeigel.com>
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -17,157 +17,41 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
-#include <Arduino.h>
-#include <Wire.h>
-#include <time.h>
 #include <ESP8266WiFi.h>
-#include <ESP8266WebServer.h>
-#include <WebSocketsServer.h>
+#include <PubSubClient.h>
 #include "Adafruit_BME680.h"
-#include "ESP8266NTP.h"
-#include "ESP8266mDNS.h"
 
-#include "static/index.html.h"
-#include "static/favicon.png.h"
-#include "static/manifest.webmanifest.h"
+#include "configuration.h"
 
-#include "wifi_credentials.h"
+WiFiClient wifi;
+PubSubClient mqtt(wifi);
 
-#define NAME   ("AirQ")
-#define SERVER_PORT  (80)
-#define SOCKET_PORT  (81)
-#define I2C_SDA      (4)
-#define I2C_CLK      (0)
-
-// If enabled, UDP packages will be sent to server
-#define UDP_ENABLE   (1)
-#if UDP_ENABLE
-    #include <ArduinoJson.h>
-    #define UDP_SERVERIP            ("192.168.178.28")  // IP to local server running UDPRecorder
-    #define UDP_PORT                (5777)              // UDP port to use (matching UDPRecorder)
-    #define UDP_PACKAGE_INTERVAL    (60000)             // Waiting time in ms (60000 = 1 minute)
-    #define UDP_MSGSIZE             (100)
-    WiFiUDP udp;
-    IPAddress udpIP;
-    uint32_t lastUDPMillis;
-#endif
-
-// Linear regression results of calibration
-#define TEMP_REGRESSION_M (-4.9776)
-#define TEMP_REGRESSION_X ( 0.9167)
-
-typedef struct SensorData
-{
-    uint32_t unixTime;
-    float temperature;
-    float pressure;
-    float humidity;
-    float gasResistance;
-} SensorData;
-
-static char buffer[1024];       // Buffer for string creation
 Adafruit_BME680 bme;
-ESP8266WebServer server(SERVER_PORT);
-WebSocketsServer websocket(SOCKET_PORT);
-ESP8266NTP ntp;
-SensorData sensordata;
-uint32_t sensorReadingDone = 0; // Time in millis when the BME680 is ready
-
-void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t lenght)
-{
-  switch (type) {
-    case WStype_DISCONNECTED:
-        Serial.print("[WebSocket] Disconnected client ");
-        Serial.println(num);
-        break;
-    case WStype_CONNECTED: {
-            IPAddress ip = websocket.remoteIP(num);
-            Serial.print("[WebSocket] Connected client ");
-            Serial.print(num);
-            Serial.print(" from ");
-            Serial.print(ip[0]);
-            Serial.print(".");
-            Serial.print(ip[1]);
-            Serial.print(".");
-            Serial.print(ip[2]);
-            Serial.print(".");
-            Serial.print(ip[3]);
-            Serial.println();
-        }
-        break;
-    case WStype_TEXT:
-    break;
-  }
-}
-
-void sensordataToJSON(SensorData* data, char* buffer, size_t bufferSize)
-{
-    // Make JSON string from sensor data
-    snprintf(buffer, bufferSize,
-        "{"
-        "\"time\":%d,"
-        "\"temperature\":%f,"
-        "\"humidity\":%f,"
-        "\"pressure\":%f,"
-        "\"gas\":%f"
-        "}",
-        data->unixTime,
-        data->temperature,
-        data->humidity,
-        data->pressure,
-        data->gasResistance);
-}
-
-void serveData()
-{
-    sensordataToJSON(&sensordata, buffer, sizeof(buffer));
-    server.send(200, "text/json", buffer);
-}
-
-void dataUpdateOverWebsocket()
-{
-    sensordataToJSON(&sensordata, buffer, sizeof(buffer));
-    websocket.broadcastTXT(buffer, strlen(buffer));
-}
-
-void sendUDPPackage(SensorData* data)
-{
-    char buffer[UDP_MSGSIZE];
-    StaticJsonDocument<UDP_MSGSIZE> msgPack;
-    msgPack["name"]         = NAME;
-    msgPack["time"]         = data->unixTime;
-    msgPack["temperature"]  = data->temperature;
-    msgPack["pressure"]     = data->pressure;
-    msgPack["humidity"]     = data->humidity;
-    msgPack["gas"]          = data->gasResistance;
-    size_t msgSize = serializeMsgPack(msgPack, buffer);
-
-    udp.beginPacket(udpIP, UDP_PORT);
-    udp.write(buffer, msgSize);
-    udp.endPacket();
-}
+bool isSensorRunning = false;
+uint32_t nextUpdate = 0;
 
 void setup()
 {
     Serial.begin(115200);
 
-    // Connect to WIFI
+    // WIFI setup
+    Serial.print("Connecting to wifi (");
+    Serial.print(WIFI_SSID);
+    Serial.print(")...");
+
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PWD);
     while(WiFi.status() != WL_CONNECTED) {
         delay(100);
         Serial.print(".");
     }
-    Serial.println("");
-    Serial.println("WiFi connected");
+    Serial.print(" OK! IP: ");
+    Serial.println(WiFi.localIP());
 
-    server.begin();
-    Serial.print("Server started ");
-    Serial.print(WiFi.localIP());
-    Serial.print(":");
-    Serial.println(SERVER_PORT);
+    // MQTT setup
+    mqtt.setServer(MQTT_BROKER_IP, MQTT_BROKER_PORT);
 
-    // SETUP I2C
+    // Setup I2C
     Wire.begin(I2C_SDA, I2C_CLK);
     if(!bme.begin()) {
         Serial.println("ERROR: Could not find a valid BME680 sensor, check wiring!");
@@ -180,81 +64,51 @@ void setup()
     bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
     bme.setGasHeater(320, 150); // 320*C for 150 ms
 
-    // SETUP SERVER ROUTES
-    server.on("/", []() {
-        server.send_P(200, "text/html", (const char*)index_html, index_html_len);
-    });
-    server.on("/favicon.png", []() {
-        server.send_P(200, "image/png", (const char*)favicon_png, favicon_png_len);
-    });
-    server.on("/manifest.webmanifest", []() {
-        server.send_P(200, "application/manifest+json", (const char*)manifest_webmanifest, manifest_webmanifest_len);
-    });
-    server.on("/data", serveData);
-    server.begin();
-
     // Start first sensor reading
-    sensorReadingDone = bme.beginReading();
-
-    // Start websockets
-    websocket.begin();
-    websocket.onEvent(webSocketEvent);
-
-    // Start network time service
-    ntp.begin("0.europe.pool.ntp.org", 300);
-
-    // Start MDNS
-    if(MDNS.begin(NAME)) {
-        Serial.print("MDNS registered ("); Serial.print(NAME); Serial.println(".local)");
-        MDNS.addService("http", "tcp", 80);
-    }
-
-    // Start UDP service if enabled
-    #if UDP_ENABLE
-        udp = WiFiUDP();
-        if(!udpIP.fromString(UDP_SERVERIP)) {
-            Serial.println("ERROR: UDP_SERVERIP is not a valid ip!");
-            while (1);
-        }
-    #endif
+    nextUpdate = bme.beginReading();
+    isSensorRunning = true;
 }
 
 void loop()
 {
     uint32_t currentMillis = millis();
 
-    MDNS.update();
-
-    // Update the time
-    ntp.update();
-    uint32_t unix = ntp.now();
-
-    // Read sensor data
-    if(currentMillis >= sensorReadingDone) {
-        // Save data for last sensor readings
-        bme.endReading();
-        sensordata.unixTime = unix;
-        sensordata.temperature = TEMP_REGRESSION_X * bme.temperature + TEMP_REGRESSION_M;
-        sensordata.humidity = bme.humidity;
-        sensordata.pressure = bme.pressure / 100.0;
-        sensordata.gasResistance = bme.gas_resistance / 1000.0;
-
-        // Publish data over Websocket
-        dataUpdateOverWebsocket();
-
-        #if UDP_ENABLE
-            // Publish data over UDP in given interval
-            if(currentMillis >= lastUDPMillis + UDP_PACKAGE_INTERVAL) {
-                sendUDPPackage(&sensordata);
-                lastUDPMillis = currentMillis;
-            }
-        #endif
-
-        // Start new sensing cycle
-        sensorReadingDone = bme.beginReading();
+    // Ensure connection over mqtt
+    while (!mqtt.connected()) {
+        Serial.print("Connecting to mqtt... ");
+        if (mqtt.connect(MQTT_CLIENT_NAME)) {
+            Serial.println("OK");
+        } else {
+            Serial.print("FAILED (state=");
+            Serial.print(mqtt.state());
+            Serial.println(") try again in 5 seconds");
+            delay(5000);
+        }
     }
+    mqtt.loop();
 
-    // Serve data
-    websocket.loop();
-    server.handleClient();
+    // Only update after delay
+    if(currentMillis >= nextUpdate) {
+        if(isSensorRunning) {
+            // Save data for last sensor readings
+            bme.endReading();
+            float temperature = bme.temperature;
+            float humidity = bme.humidity;
+            float pressure = bme.pressure / 100.0;
+            float gasResistance = bme.gas_resistance / 1000.0;
+
+            // Publish sensor data over mqtt
+            mqtt.publish(MQTT_CHANNEL_TEMPERATURE, String(temperature).c_str());
+            mqtt.publish(MQTT_CHANNEL_HUMIDITY, String(humidity).c_str());
+            mqtt.publish(MQTT_CHANNEL_PRESSURE, String(pressure).c_str());
+            mqtt.publish(MQTT_CHANNEL_GAS, String(gasResistance).c_str());
+
+            nextUpdate = currentMillis + DELAY;
+            isSensorRunning = false;
+        } else {
+            // Time for new sensor reading
+            nextUpdate = bme.beginReading();
+            isSensorRunning = true;
+        }
+    }
 }
