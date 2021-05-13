@@ -1,7 +1,10 @@
 #pragma once
 
-// Approximate publishing delay in ms (1min = 60000)
-#define DELAY      (60000)
+// Approximate publishing delay in ns (1min = 60000)
+#define DELAY      (60e6)
+
+// Delay to wait for wifi sending MQTT data (in ms)
+#define WIFI_DELAY (100)
 
 // WIFI configuration
 #define WIFI_SSID  ("YOUR_SSID")
